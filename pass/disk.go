@@ -95,33 +95,37 @@ type site struct {
 func (s *diskStore) Lookup(query string) ([]string, error) {
 	sites := make([]*site, 0)
 	siteCh := make(chan *site)
+	errCh := make(chan error)
+
 	go func() {
-		for site := range siteCh {
-			sites = append(sites, site)
-		}
+		err := fastwalk.FastWalk(s.path, func(dir string, typ os.FileMode) error {
+			if dir == s.path {
+				return nil
+			}
+			if typ&os.ModeDir != 0 {
+				files, err := ioutil.ReadDir(dir)
+				if err != nil {
+					return err
+				}
+
+				users := make([]string, 0, len(files))
+				for _, file := range files {
+					users = append(users, strings.TrimSuffix(file.Name(), ".gpg"))
+				}
+				siteCh <- &site{domain: path.Base(dir), users: users}
+				return filepath.SkipDir
+			}
+			return nil
+		})
+		close(siteCh)
+		errCh <- err
 	}()
 
-	err := fastwalk.FastWalk(s.path, func(dir string, typ os.FileMode) error {
-		if dir == s.path {
-			return nil
-		}
-		if typ&os.ModeDir != 0 {
-			files, err := ioutil.ReadDir(dir)
-			if err != nil {
-				return err
-			}
+	for site := range siteCh {
+		sites = append(sites, site)
+	}
 
-			users := make([]string, 0, len(files))
-			for _, file := range files {
-				users = append(users, strings.TrimSuffix(file.Name(), ".gpg"))
-			}
-			siteCh <- &site{domain: path.Base(dir), users: users}
-			return filepath.SkipDir
-		}
-
-		return nil
-	})
-	close(siteCh)
+	err := <-errCh
 	if err != nil {
 		return nil, err
 	}
